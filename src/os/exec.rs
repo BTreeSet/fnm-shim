@@ -34,7 +34,6 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use std::ffi::OsString;
-    use std::os::windows::process::ExitStatusExt;
     use std::path::Path;
     use std::process::Command;
 
@@ -43,13 +42,9 @@ mod imp {
         // so CreateProcess will accept it directly. stdio is inherited by
         // default. We deliberately do NOT pipe streams.
         let status = Command::new(program).args(args).status()?;
-        // Prefer the standard Unix-style code; if the process was terminated
-        // by an unusual mechanism, fall back to the raw NTSTATUS truncated.
-        if let Some(code) = status.code() {
-            return Ok(code);
-        }
-        // Should be unreachable on Windows where `code()` is always Some, but
-        // we'd rather return *something* deterministic than panic.
-        Ok(status.into_raw() as i32)
+        // On Windows `ExitStatus::code()` is always `Some` for normal child
+        // termination; the only way it can be `None` is if the OS reported a
+        // non-standard status. Map that case to 1 deterministically.
+        Ok(status.code().unwrap_or(1))
     }
 }

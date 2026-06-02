@@ -38,9 +38,5 @@ fn run() -> Result<i32, ShimError> {
 
 #[inline]
 fn clamp_exit(code: i32) -> u8 {
-    if code < 0 {
-        128
-    } else {
-        (code & 0xFF) as u8
-    }
+    if code < 0 { 128 } else { (code & 0xFF) as u8 }
 }

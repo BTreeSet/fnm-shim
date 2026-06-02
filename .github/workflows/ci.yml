@@ -4,9 +4,42 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --all-targets
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -17,34 +50,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+          key: test-${{ matrix.os }}
 
       - name: cargo test
         run: cargo test --all-targets --no-fail-fast
 
       - name: Install fnm (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
           curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
-          echo "$HOME/.local/share/fnm" >> $GITHUB_PATH
+          echo "$HOME/.local/share/fnm" >> "$GITHUB_PATH"
 
       - name: Install fnm (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           winget install --id Schniz.fnm --silent --accept-package-agreements --accept-source-agreements
-        shell: pwsh
 
       - name: E2E (Unix)
         if: runner.os != 'Windows'

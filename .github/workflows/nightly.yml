@@ -1,0 +1,196 @@
+name: Nightly Pre-Release
+
+# Publishes a pre-release for every push to `main`. The version is derived
+# deterministically from the commit's UTC timestamp and short SHA:
+#
+#     v0.0.0-YYYYMMDD.HHMMSS-<sha7>
+#
+# Artifacts: the same 6-target matrix as the tagged release workflow.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    name: Compute version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          ts="$(git show -s --format=%cd --date=format-local:%Y%m%d.%H%M%S "$GITHUB_SHA")"
+          sha7="$(git rev-parse --short=7 "$GITHUB_SHA")"
+          version="0.0.0-${ts}-${sha7}"
+          tag="nightly-${ts}-${sha7}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}"         >> "$GITHUB_OUTPUT"
+          echo "Computed version: ${version}"
+          echo "Computed tag:     ${tag}"
+        env:
+          TZ: UTC
+
+  gate:
+    name: Pre-release quality gate
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets --no-fail-fast
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [version, gate]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-nightly
+
+      - name: Patch Cargo.toml version
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          # Replace the first `version = "..."` under [package].
+          python3 - "$v" <<'PY'
+          import re, sys, pathlib
+          v = sys.argv[1]
+          p = pathlib.Path("Cargo.toml")
+          s = p.read_text()
+          s = re.sub(r'^version = "[^"]+"', f'version = "{v}"', s, count=1, flags=re.M)
+          p.write_text(s)
+          PY
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build (cargo)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Strip (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/fnm-shim"
+          if [ -f "$bin" ]; then
+            if command -v llvm-strip >/dev/null 2>&1; then llvm-strip "$bin" || true; else strip "$bin" || true; fi
+          fi
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          name="fnm-shim-v${v}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          ext=""
+          if [[ "${{ matrix.target }}" == *windows* ]]; then ext=".exe"; fi
+          cp "target/${{ matrix.target }}/release/fnm-shim${ext}" "dist/${name}/fnm-shim${ext}"
+          cp README.md LICENSE AGENTS.md "dist/${name}/"
+          cd dist
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            if command -v 7z >/dev/null 2>&1; then
+              7z a "${name}.zip" "${name}" >/dev/null
+            else
+              powershell -NoProfile -Command "Compress-Archive -Path '${name}' -DestinationPath '${name}.zip'"
+            fi
+            echo "asset=dist/${name}.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -czf "${name}.tar.gz" "${name}"
+            echo "asset=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ steps.pkg.outputs.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish pre-release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist
+
+      - name: Create / update pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: "Nightly ${{ needs.version.outputs.version }}"
+          prerelease: true
+          generate_release_notes: true
+          target_commitish: ${{ github.sha }}
+          files: dist/*
+          body: |
+            Automated pre-release built from `${{ github.sha }}`.
+
+            **Version:** `${{ needs.version.outputs.version }}`
+
+            > These builds are not guaranteed to be stable. Use tagged
+            > releases for production deployments.
