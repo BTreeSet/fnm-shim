@@ -38,9 +38,13 @@ fnm default 18
 $CachePath = Join-Path $Env:TEMP 'fnm-shim-cache.json'
 if (Test-Path $CachePath) { Remove-Item $CachePath -Force }
 
-$ShimBin = Join-Path ([System.IO.Path]::GetTempPath()) ("fnm-shim-bin-" + [Guid]::NewGuid().ToString('N'))
+$ShimBin = Join-Path $Root ("target\e2e-shim-bin-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $ShimBin | Out-Null
 # Hardlinks on Windows do not require admin and behave like multicall entries.
+# IMPORTANT: NTFS hardlinks cannot cross volumes, so $ShimBin MUST live on the
+# same drive as $Shim. We anchor it under `target/` to guarantee that — the
+# system %TEMP% is frequently on a different drive on GitHub Actions runners
+# (workspace on D:, %TEMP% on C:).
 New-Item -ItemType HardLink -Path (Join-Path $ShimBin 'node.exe')         -Value $Shim | Out-Null
 New-Item -ItemType HardLink -Path (Join-Path $ShimBin 'npm.exe')          -Value $Shim | Out-Null
 New-Item -ItemType HardLink -Path (Join-Path $ShimBin 'npx.exe')          -Value $Shim | Out-Null

@@ -65,16 +65,25 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
-          # The installer drops the binary in one of these locations depending
-          # on platform / env. Add whichever one actually contains `fnm` to
-          # the persistent workflow PATH.
-          for dir in "$HOME/.local/share/fnm" "$HOME/Library/Application Support/fnm" "$HOME/.fnm"; do
+          # The installer may drop the binary in a $HOME location *or* delegate
+          # to Homebrew (macOS), which puts it under /opt/homebrew/bin or
+          # /usr/local/bin. Probe known dirs, then fall back to PATH.
+          for dir in \
+            "$HOME/.local/share/fnm" \
+            "$HOME/Library/Application Support/fnm" \
+            "$HOME/.fnm" \
+            "/opt/homebrew/bin" \
+            "/usr/local/bin"; do
             if [ -x "$dir/fnm" ]; then
               echo "$dir" >> "$GITHUB_PATH"
               "$dir/fnm" --version
               exit 0
             fi
           done
+          if command -v fnm >/dev/null 2>&1; then
+            fnm --version
+            exit 0
+          fi
           echo "fnm binary not found after install" >&2
           exit 1
 
