@@ -63,14 +63,39 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          set -euo pipefail
           curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
-          echo "$HOME/.local/share/fnm" >> "$GITHUB_PATH"
+          # The installer drops the binary in one of these locations depending
+          # on platform / env. Add whichever one actually contains `fnm` to
+          # the persistent workflow PATH.
+          for dir in "$HOME/.local/share/fnm" "$HOME/Library/Application Support/fnm" "$HOME/.fnm"; do
+            if [ -x "$dir/fnm" ]; then
+              echo "$dir" >> "$GITHUB_PATH"
+              "$dir/fnm" --version
+              exit 0
+            fi
+          done
+          echo "fnm binary not found after install" >&2
+          exit 1
 
       - name: Install fnm (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          winget install --id Schniz.fnm --silent --accept-package-agreements --accept-source-agreements
+          $ErrorActionPreference = 'Stop'
+          $dest = Join-Path $Env:USERPROFILE '.fnm'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $zip = Join-Path $Env:RUNNER_TEMP 'fnm-windows.zip'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://github.com/Schniz/fnm/releases/latest/download/fnm-windows.zip' `
+            -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          if (-not (Test-Path (Join-Path $dest 'fnm.exe'))) {
+            throw "fnm.exe not present at $dest after extraction"
+          }
+          # Persist for subsequent workflow steps.
+          Add-Content -Path $Env:GITHUB_PATH -Value $dest
+          & (Join-Path $dest 'fnm.exe') --version
 
       - name: E2E (Unix)
         if: runner.os != 'Windows'
