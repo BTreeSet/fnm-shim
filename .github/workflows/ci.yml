@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-targets --no-fail-fast
+
+      - name: Install fnm (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
+          echo "$HOME/.local/share/fnm" >> $GITHUB_PATH
+
+      - name: Install fnm (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          winget install --id Schniz.fnm --silent --accept-package-agreements --accept-source-agreements
+        shell: pwsh
+
+      - name: E2E (Unix)
+        if: runner.os != 'Windows'
+        run: bash scripts/e2e.sh
+
+      - name: E2E (Windows)
+        if: runner.os == 'Windows'
+        run: pwsh -File scripts/e2e.ps1

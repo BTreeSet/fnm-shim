@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross (if needed)
+        if: matrix.cross && runner.os == 'Linux'
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build (cargo)
+        if: matrix.os != 'ubuntu-latest' || !matrix.cross
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross && runner.os == 'Linux'
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Strip binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          bin="target/${{ matrix.target }}/release/fnm-shim"
+          if [ -f "$bin" ]; then
+            if command -v llvm-strip >/dev/null 2>&1; then llvm-strip "$bin" || true; else strip "$bin" || true; fi
+          fi
+        shell: bash
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          name="fnm-shim-${tag}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          ext=""
+          if [[ "${{ matrix.target }}" == *windows* ]]; then ext=".exe"; fi
+          cp "target/${{ matrix.target }}/release/fnm-shim${ext}" "dist/${name}/fnm-shim${ext}"
+          cp README.md LICENSE "dist/${name}/"
+          cd dist
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            if command -v 7z >/dev/null 2>&1; then
+              7z a "${name}.zip" "${name}" >/dev/null
+            else
+              powershell -NoProfile -Command "Compress-Archive -Path '${name}' -DestinationPath '${name}.zip'"
+            fi
+            echo "asset=dist/${name}.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -czf "${name}.tar.gz" "${name}"
+            echo "asset=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.pkg.outputs.asset }}

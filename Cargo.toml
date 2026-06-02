@@ -1,0 +1,43 @@
+[package]
+name = "fnm-shim"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Stable, shell-independent multicall shim routing node/npm/npx to the active fnm environment."
+license = "MIT"
+repository = "https://github.com/fnm-shim/fnm-shim"
+readme = "README.md"
+keywords = ["fnm", "node", "npm", "shim", "windows"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "fnm-shim"
+path = "src/main.rs"
+
+# Optional additional binary names so cargo install produces standard hardlink targets
+# on Unix dev machines. On Windows the produced fnm-shim.exe is hardlinked at install time.
+[[bin]]
+name = "node"
+path = "src/bin/node.rs"
+
+[[bin]]
+name = "npm"
+path = "src/bin/npm.rs"
+
+[[bin]]
+name = "npx"
+path = "src/bin/npx.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
