@@ -75,8 +75,12 @@ mod tests {
 
     #[test]
     fn nanos_conversion_handles_known_value() {
-        let t = UNIX_EPOCH + Duration::from_nanos(42_000_000_001);
-        assert_eq!(mtime_to_nanos(t), 42_000_000_001u128);
+        // NOTE: must be aligned to 100ns because Windows `SystemTime` is
+        // backed by `FILETIME` (100ns granularity). Sub-100ns components are
+        // truncated on construction, which would otherwise make this test
+        // flake on Windows runners.
+        let t = UNIX_EPOCH + Duration::from_nanos(42_000_000_100);
+        assert_eq!(mtime_to_nanos(t), 42_000_000_100u128);
     }
 
     #[test]
