@@ -265,6 +265,7 @@ case "$OS" in
             --setenv npm_config_globalconfig "$SANDBOX_ROOT/home/.npmrc-global" \
             --die-with-parent \
             --new-session \
+            --unshare-user \
             --unshare-ipc \
             --unshare-pid \
             --unshare-uts \

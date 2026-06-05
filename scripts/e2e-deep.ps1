@@ -183,16 +183,20 @@ Step '[F] exit-code fidelity through npm script'
 $ec = Join-Path $Env:WORKDIR 'ec'
 $null = New-Item -ItemType Directory -Force -Path $ec
 Set-Location $ec
-@'
-{
-  "name": "ec-test",
-  "version": "0.0.0",
-  "private": true,
-  "scripts": {
-    "boom": "node -e \"process.exit(42)\""
-  }
+# IMPORTANT: build package.json via ConvertTo-Json rather than a nested
+# here-string. PowerShell here-strings cannot nest — an inner `'@` at the
+# start of a line would terminate the OUTER here-string that wraps this
+# whole workload body, mis-parsing everything that follows.
+$pkgObj = [ordered]@{
+    name    = 'ec-test'
+    version = '0.0.0'
+    private = $true
+    scripts = [ordered]@{
+        boom = 'node -e "process.exit(42)"'
+    }
 }
-'@ | Set-Content -Path package.json -Encoding ascii
+$pkgJson = $pkgObj | ConvertTo-Json -Depth 5
+Set-Content -Path package.json -Value $pkgJson -Encoding ascii
 & npm run boom --silent
 $got = $LASTEXITCODE
 if ($got -ne 42) { Fail "expected exit 42 through npm script, got $got" }
