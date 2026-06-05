@@ -234,6 +234,14 @@ case "$OS" in
         # ACTIONS_RUNTIME_TOKEN, GITHUB_TOKEN, ACTIONS_ID_TOKEN_REQUEST_*,
         # NODE_AUTH_TOKEN, NPM_TOKEN, et al). Only what we explicitly
         # --setenv reaches the workload.
+        #
+        # DNS: on Ubuntu (GitHub runners, Debian), /etc/resolv.conf is a
+        # symlink into /run/systemd/resolve/. Our --tmpfs /run would mask
+        # the symlink target and break getaddrinfo() inside the sandbox.
+        # We rebind the resolver paths read-only after the tmpfs so DNS
+        # works. --ro-bind-try makes both binds no-ops on systems that
+        # don't use systemd-resolved (e.g. some distros, or after upstream
+        # changes), so the script stays portable.
         exec bwrap \
             --clearenv \
             --ro-bind / / \
@@ -242,6 +250,8 @@ case "$OS" in
             --tmpfs /tmp \
             --tmpfs /run \
             --tmpfs /var/tmp \
+            --ro-bind-try /run/systemd/resolve /run/systemd/resolve \
+            --ro-bind-try /run/NetworkManager/resolv.conf /run/NetworkManager/resolv.conf \
             --dev /dev \
             --proc /proc \
             --bind "$SANDBOX_ROOT" "$SANDBOX_ROOT" \
