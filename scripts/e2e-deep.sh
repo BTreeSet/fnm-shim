@@ -20,7 +20,10 @@
 #   Linux:  bubblewrap (`bwrap`) — unprivileged user-namespace sandbox.
 #           * Host fs mounted read-only.
 #           * `/home`, `/root`, `/Users`, `/var/log` masked with tmpfs to hide
-#             user secrets and writable surfaces.
+#             user secrets and writable surfaces. This also hides the GHA
+#             runner's workspace (`/home/runner/work/...`), whose .git/config
+#             contains the http extraheader auth token when persist-creds is
+#             left on the default.
 #           * Fresh tmpfs for `/tmp`, `/run`, `/var/tmp`.
 #           * The ONLY writable host path is the throwaway $SANDBOX_ROOT.
 #           * `--die-with-parent`, `--new-session`, `--unshare-{ipc,pid,uts}`.
@@ -33,6 +36,23 @@
 #
 # Other platforms are explicitly rejected so this script never runs
 # unsandboxed by accident.
+#
+# GITHUB ACTIONS SECRET HYGIENE
+# -----------------------------
+# A GHA runner injects these secret-bearing env vars unconditionally:
+#
+#   GITHUB_TOKEN                       (if surfaced as env)
+#   ACTIONS_RUNTIME_TOKEN              (artifacts + cache, very dangerous)
+#   ACTIONS_RUNTIME_URL
+#   ACTIONS_CACHE_URL / _RESULTS_URL
+#   ACTIONS_ID_TOKEN_REQUEST_TOKEN     (OIDC; cloud-pivot dangerous)
+#   ACTIONS_ID_TOKEN_REQUEST_URL
+#   NODE_AUTH_TOKEN / NPM_TOKEN        (if a prior step set them)
+#
+# The sandbox uses `bwrap --clearenv` (Linux) and `env -i` (macOS), then
+# rebuilds the child environment from a minimal allowlist. Nothing the host
+# has in env reaches the workload unless it appears explicitly below.
+# Reviewers: do NOT add any of the variables above to the allowlists.
 #
 # WHAT IS TESTED INSIDE THE SANDBOX
 # ---------------------------------
@@ -109,10 +129,13 @@ step() { printf -- '---- %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 step "verifying isolation"
-# Probe: any write outside the sandbox MUST fail.
+# Probe: any write outside the sandbox MUST fail. We deliberately do NOT
+# accept a host-side path via env — leaking HOME from the host into the
+# sandbox env would partially defeat the secret scrubbing.
 ESCAPE_PATHS=(
     "/etc/.fnm-shim-escape-probe"
-    "${HOME_OUTSIDE:?}/.fnm-shim-escape-probe"
+    "/usr/.fnm-shim-escape-probe"
+    "/.fnm-shim-escape-probe"
 )
 for p in "${ESCAPE_PATHS[@]}"; do
     if : > "$p" 2>/dev/null; then
@@ -120,7 +143,19 @@ for p in "${ESCAPE_PATHS[@]}"; do
         fail "sandbox is leaky: wrote to $p"
     fi
 done
-printf '    OK: writes denied to /etc and host HOME (%s)\n' "$HOME_OUTSIDE"
+printf '    OK: writes denied to /etc, /usr, /\n'
+
+step "verifying secret-env scrubbing"
+# These vars MUST NOT survive the sandbox boundary. If any are present,
+# the sandbox plumbing has regressed and we refuse to proceed.
+for v in GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+         ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_CACHE_URL ACTIONS_RESULTS_URL \
+         ACTIONS_RUNTIME_URL NODE_AUTH_TOKEN NPM_TOKEN RUNNER_TOKEN; do
+    if [[ -n "${!v:-}" ]]; then
+        fail "env leak: \$$v is set inside the sandbox"
+    fi
+done
+printf '    OK: no CI secret env vars leaked into the sandbox\n'
 
 step "tool versions (via shim)"
 node -v
@@ -187,11 +222,20 @@ case "$OS" in
     Linux)
         command -v bwrap >/dev/null 2>&1 || die \
             "bwrap is required on Linux. Install: sudo apt-get install -y bubblewrap"
-        log "sandbox: bubblewrap"
+        log "sandbox: bubblewrap (--clearenv; allowlisted setenv only)"
+        # fnm must be locatable inside the sandbox. We mount its directory
+        # read-only and prepend it to PATH explicitly rather than relying on
+        # the host PATH inheritance (which we're deliberately wiping).
+        FNM_BIN="$(command -v fnm)"
+        FNM_BIN_DIR="$(dirname "$FNM_BIN")"
+
         # Order matters: tmpfs comes BEFORE binds that land inside it.
-        # The sandbox dir is under $ROOT/target so the --bind doesn't depend
-        # on /tmp layout.
+        # `--clearenv` strips the entire inherited env (including
+        # ACTIONS_RUNTIME_TOKEN, GITHUB_TOKEN, ACTIONS_ID_TOKEN_REQUEST_*,
+        # NODE_AUTH_TOKEN, NPM_TOKEN, et al). Only what we explicitly
+        # --setenv reaches the workload.
         exec bwrap \
+            --clearenv \
             --ro-bind / / \
             --tmpfs /home \
             --tmpfs /root \
@@ -203,17 +247,22 @@ case "$OS" in
             --bind "$SANDBOX_ROOT" "$SANDBOX_ROOT" \
             --ro-bind "$HOST_SHIM_DIR" "$HOST_SHIM_DIR" \
             --ro-bind "$FNM_DIR" "$FNM_DIR" \
+            --ro-bind "$FNM_BIN_DIR" "$FNM_BIN_DIR" \
             --setenv HOME "$SANDBOX_ROOT/home" \
-            --setenv HOME_OUTSIDE "$HOME" \
             --setenv WORKDIR "$SANDBOX_ROOT/work" \
             --setenv TMPDIR "/tmp" \
-            --setenv PATH "$HOST_SHIM_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            --setenv PATH "$HOST_SHIM_DIR:$FNM_BIN_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
             --setenv FNM_DIR "$FNM_DIR" \
-            --setenv CI "${CI:-}" \
+            --setenv LANG "${LANG:-C.UTF-8}" \
+            --setenv LC_ALL "${LC_ALL:-C.UTF-8}" \
             --setenv npm_config_audit "false" \
             --setenv npm_config_fund "false" \
             --setenv npm_config_update_notifier "false" \
             --setenv npm_config_loglevel "warn" \
+            --setenv npm_config_cache "$SANDBOX_ROOT/npm-cache" \
+            --setenv npm_config_prefix "$SANDBOX_ROOT/npm-prefix" \
+            --setenv npm_config_userconfig "$SANDBOX_ROOT/home/.npmrc" \
+            --setenv npm_config_globalconfig "$SANDBOX_ROOT/home/.npmrc-global" \
             --die-with-parent \
             --new-session \
             --unshare-ipc \
@@ -246,18 +295,27 @@ case "$OS" in
 (allow file-write* (subpath "/private/var/tmp"))
 (allow file-write* (subpath "/private/var/folders"))
 SEATBELT
+        FNM_BIN="$(command -v fnm)"
+        FNM_BIN_DIR="$(dirname "$FNM_BIN")"
+        # env -i wipes ALL inherited env (including GHA secret tokens).
+        # Allowlist only what the workload needs. No GITHUB_*, ACTIONS_*,
+        # RUNNER_*, NODE_AUTH_TOKEN, NPM_TOKEN, or HOME_OUTSIDE.
         env -i \
-            HOME_OUTSIDE="$HOME" \
             HOME="$SANDBOX_ROOT/home" \
             WORKDIR="$SANDBOX_ROOT/work" \
             TMPDIR="$SANDBOX_ROOT/tmp" \
-            PATH="$HOST_SHIM_DIR:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin" \
+            PATH="$HOST_SHIM_DIR:$FNM_BIN_DIR:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin" \
             FNM_DIR="$FNM_DIR" \
-            CI="${CI:-}" \
+            LANG="${LANG:-C.UTF-8}" \
+            LC_ALL="${LC_ALL:-C.UTF-8}" \
             npm_config_audit=false \
             npm_config_fund=false \
             npm_config_update_notifier=false \
             npm_config_loglevel=warn \
+            npm_config_cache="$SANDBOX_ROOT/npm-cache" \
+            npm_config_prefix="$SANDBOX_ROOT/npm-prefix" \
+            npm_config_userconfig="$SANDBOX_ROOT/home/.npmrc" \
+            npm_config_globalconfig="$SANDBOX_ROOT/home/.npmrc-global" \
             sandbox-exec -f "$PROFILE" bash "$WORKLOAD"
         ;;
     *)

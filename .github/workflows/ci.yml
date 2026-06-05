@@ -113,3 +113,110 @@ jobs:
       - name: E2E (Windows)
         if: runner.os == 'Windows'
         run: pwsh -File scripts/e2e.ps1
+
+  # ---------------------------------------------------------------------------
+  # Deep end-to-end tests against real community tooling (Vite, TypeScript)
+  # via `npm install` / `npx`. These execute arbitrary third-party
+  # postinstall scripts, so the job is hardened as follows:
+  #
+  #   * `permissions:` is overridden to `contents: read` ONLY (no packages,
+  #     no id-token, no anything else). The workflow-level default is the
+  #     same, but we re-state it per-job to make the least-privilege
+  #     intent explicit and to prevent silent escalation if defaults change.
+  #   * `actions/checkout` runs with `persist-credentials: false` so the
+  #     GITHUB_TOKEN is NOT written to `.git/config` as an http extraheader.
+  #   * No `env:` block injects GITHUB_TOKEN, NODE_AUTH_TOKEN, NPM_TOKEN,
+  #     or anything else into the step environment.
+  #   * The sandbox runner (`bwrap --clearenv` on Linux, `env -i ... +
+  #     sandbox-exec` on macOS, allowlisted ProcessStartInfo on Windows)
+  #     scrubs the entire env block before any third-party code executes,
+  #     and the workload itself asserts that ACTIONS_RUNTIME_TOKEN /
+  #     ACTIONS_ID_TOKEN_REQUEST_TOKEN / GITHUB_TOKEN / NODE_AUTH_TOKEN /
+  #     NPM_TOKEN are absent before proceeding.
+  #   * This job is intentionally NOT a `needs:` dependency of any
+  #     publishing workflow (release.yml / nightly.yml), so even a worst-
+  #     case sandbox break cannot affect tagged release artifacts.
+  # ---------------------------------------------------------------------------
+  e2e-deep:
+    name: E2E (deep, sandboxed) — ${{ matrix.os }}
+    needs: [lint, test]
+    runs-on: ${{ matrix.os }}
+    # Override workflow default: nothing beyond read access to the repo.
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Do NOT persist the GITHUB_TOKEN into .git/config; a sandbox
+          # break could otherwise read it from the on-disk repo config.
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-deep-${{ matrix.os }}
+
+      - name: Install bubblewrap (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          bwrap --version
+
+      - name: Install fnm (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
+          for dir in \
+            "$HOME/.local/share/fnm" \
+            "$HOME/Library/Application Support/fnm" \
+            "$HOME/.fnm" \
+            "/opt/homebrew/bin" \
+            "/usr/local/bin"; do
+            if [ -x "$dir/fnm" ]; then
+              echo "$dir" >> "$GITHUB_PATH"
+              "$dir/fnm" --version
+              exit 0
+            fi
+          done
+          if command -v fnm >/dev/null 2>&1; then
+            fnm --version
+            exit 0
+          fi
+          echo "fnm binary not found after install" >&2
+          exit 1
+
+      - name: Install fnm (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = Join-Path $Env:USERPROFILE '.fnm'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $zip = Join-Path $Env:RUNNER_TEMP 'fnm-windows.zip'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://github.com/Schniz/fnm/releases/latest/download/fnm-windows.zip' `
+            -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          if (-not (Test-Path (Join-Path $dest 'fnm.exe'))) {
+            throw "fnm.exe not present at $dest after extraction"
+          }
+          Add-Content -Path $Env:GITHUB_PATH -Value $dest
+          & (Join-Path $dest 'fnm.exe') --version
+
+      - name: Deep E2E (Unix)
+        if: runner.os != 'Windows'
+        run: bash scripts/e2e-deep.sh
+
+      - name: Deep E2E (Windows)
+        if: runner.os == 'Windows'
+        # CI=true is already set by GHA; the script's safety gate accepts it.
+        # The script clears the child process env via ProcessStartInfo.
+        run: pwsh -File scripts/e2e-deep.ps1

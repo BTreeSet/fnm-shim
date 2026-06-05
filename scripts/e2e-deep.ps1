@@ -29,6 +29,25 @@
 #   * Running inside Windows Sandbox (WDAGUtilityAccount).
 #   * `-AllowUnsafe` was passed (operator explicitly accepted the risk).
 # Recommended developer flow: run inside Windows Sandbox or a throwaway VM.
+#
+# GITHUB ACTIONS SECRET HYGIENE
+# -----------------------------
+# The child process env block is fully cleared via
+# `ProcessStartInfo.EnvironmentVariables.Clear()` and re-populated from a
+# tight allowlist below. The following GHA-injected variables are
+# DELIBERATELY excluded and MUST NOT be added back:
+#
+#   GITHUB_TOKEN                       (if surfaced as env)
+#   ACTIONS_RUNTIME_TOKEN              (artifacts + cache; very dangerous)
+#   ACTIONS_RUNTIME_URL
+#   ACTIONS_CACHE_URL / _RESULTS_URL
+#   ACTIONS_ID_TOKEN_REQUEST_TOKEN     (OIDC; cloud-pivot dangerous)
+#   ACTIONS_ID_TOKEN_REQUEST_URL
+#   NODE_AUTH_TOKEN / NPM_TOKEN        (npm registry push)
+#   RUNNER_TOKEN / RUNNER_*            (runner self-registration)
+#
+# The workload includes a runtime assertion that none of these vars are
+# present inside the sandbox before any third-party code runs.
 
 [CmdletBinding()]
 param(
@@ -107,6 +126,23 @@ Set-StrictMode -Version Latest
 
 function Step($msg) { Write-Host "---- $msg" }
 function Fail($msg) { Write-Error "FAIL: $msg"; exit 1 }
+
+Step 'verifying secret-env scrubbing'
+# These MUST NOT survive the ProcessStartInfo allowlist. If any are present,
+# the sandbox plumbing has regressed and we refuse to run third-party code.
+$forbidden = @(
+    'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RUNTIME_URL',
+    'ACTIONS_CACHE_URL', 'ACTIONS_RESULTS_URL',
+    'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_URL',
+    'NODE_AUTH_TOKEN', 'NPM_TOKEN', 'RUNNER_TOKEN'
+)
+foreach ($v in $forbidden) {
+    $val = [Environment]::GetEnvironmentVariable($v)
+    if (-not [string]::IsNullOrEmpty($val)) {
+        Fail "env leak: `$$v is set inside the sandbox"
+    }
+}
+Write-Host '    OK: no CI secret env vars leaked into the sandbox'
 
 Step 'tool versions (via shim)'
 node -v
