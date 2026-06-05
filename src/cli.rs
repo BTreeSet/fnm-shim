@@ -21,19 +21,22 @@ impl Mode {
         let path = Path::new(argv0);
         // `file_stem` strips ONE extension; this gives us "node" from "node.exe"
         // and "node" from "node" alike. For platforms that allow weird suffixes
-        // we additionally normalize.
+        // we additionally normalize via ASCII-insensitive comparison.
         let stem = path.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
             ShimError::UnsupportedInvocation(argv0.to_string_lossy().into_owned())
         })?;
 
-        let normalized = stem.to_ascii_lowercase();
-        match normalized.as_str() {
-            "node" => Ok(Mode::Node),
-            "npm" => Ok(Mode::Npm),
-            "npx" => Ok(Mode::Npx),
+        if stem.eq_ignore_ascii_case("node") {
+            Ok(Mode::Node)
+        } else if stem.eq_ignore_ascii_case("npm") {
+            Ok(Mode::Npm)
+        } else if stem.eq_ignore_ascii_case("npx") {
+            Ok(Mode::Npx)
+        } else {
             // Special-case: invoked as the canonical binary name. Without a
-            // routing target, fall through to a clear error.
-            other => Err(ShimError::UnsupportedInvocation(other.to_string())),
+            // routing target, fall through to a clear error preserving the
+            // original (non-lowercased) name for diagnostics.
+            Err(ShimError::UnsupportedInvocation(stem.to_owned()))
         }
     }
 

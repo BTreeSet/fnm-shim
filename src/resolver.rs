@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::cache::{self, CacheRecord};
+use crate::cache::{self, CacheRecordRef};
 use crate::error::ShimError;
 use crate::fnm_dir;
 use crate::os;
@@ -17,7 +17,7 @@ use crate::os;
 /// Type-state: only this struct can be passed to dispatch. It is exclusively
 /// constructed by `resolve()`, guaranteeing every field is a verified absolute
 /// path to an executable file appropriate for the host OS.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ResolvedTargets {
     pub node: PathBuf,
     pub npm: PathBuf,
@@ -26,13 +26,15 @@ pub struct ResolvedTargets {
 
 pub fn resolve(fnm_dir_path: &Path) -> Result<ResolvedTargets, ShimError> {
     let default_alias = fnm_dir::default_alias(fnm_dir_path);
-    let current_mtime = cache::symlink_mtime(&default_alias)
-        .map_err(|_| ShimError::DefaultAliasMissing(default_alias.clone()))?;
-    let current_nanos = cache::mtime_to_nanos(current_mtime).to_string();
+    let current_mtime = match cache::symlink_mtime(&default_alias) {
+        Ok(t) => t,
+        Err(_) => return Err(ShimError::DefaultAliasMissing(default_alias)),
+    };
+    let current_nanos = cache::mtime_to_nanos(current_mtime);
 
     let cache_path = cache::cache_path();
     if let Some(rec) = cache::read(&cache_path) {
-        if rec.default_mtime_nanos == current_nanos
+        if rec.default_mtime_nanos.parse::<u128>().ok() == Some(current_nanos)
             && rec.node.exists()
             && rec.npm.exists()
             && rec.npx.exists()
@@ -46,14 +48,17 @@ pub fn resolve(fnm_dir_path: &Path) -> Result<ResolvedTargets, ShimError> {
     }
 
     let targets = resolve_via_fnm_exec()?;
-    let record = CacheRecord {
-        default_mtime_nanos: current_nanos,
-        node: targets.node.clone(),
-        npm: targets.npm.clone(),
-        npx: targets.npx.clone(),
-    };
+    let nanos_str = current_nanos.to_string();
     // Best-effort cache write — failure here must not block execution.
-    let _ = cache::write(&cache_path, &record);
+    let _ = cache::write(
+        &cache_path,
+        &CacheRecordRef {
+            default_mtime_nanos: &nanos_str,
+            node: &targets.node,
+            npm: &targets.npm,
+            npx: &targets.npx,
+        },
+    );
     Ok(targets)
 }
 
@@ -89,13 +94,10 @@ fn resolve_via_fnm_exec() -> Result<ResolvedTargets, ShimError> {
         });
     }
     let node = PathBuf::from(node_path);
-    let dir = node
-        .parent()
-        .ok_or_else(|| ShimError::FnmExecFailed {
-            status: None,
-            stderr: format!("node execPath {node_path:?} has no parent directory"),
-        })?
-        .to_path_buf();
+    let dir = node.parent().ok_or_else(|| ShimError::FnmExecFailed {
+        status: None,
+        stderr: format!("node execPath {node_path:?} has no parent directory"),
+    })?;
 
     let npm = dir.join(os::npm_filename());
     let npx = dir.join(os::npx_filename());

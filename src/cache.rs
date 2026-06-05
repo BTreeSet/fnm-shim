@@ -9,7 +9,8 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Owned form, used when **reading** the JSON cache.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CacheRecord {
     /// Symlink mtime as nanoseconds since UNIX_EPOCH. Stored as string to
     /// preserve full u128 precision across JSON.
@@ -17,6 +18,16 @@ pub struct CacheRecord {
     pub node: PathBuf,
     pub npm: PathBuf,
     pub npx: PathBuf,
+}
+
+/// Borrowed form, used when **writing** the JSON cache. Carries references
+/// so the resolver does not have to clone its already-resolved paths.
+#[derive(Debug, Serialize)]
+pub struct CacheRecordRef<'a> {
+    pub default_mtime_nanos: &'a str,
+    pub node: &'a Path,
+    pub npm: &'a Path,
+    pub npx: &'a Path,
 }
 
 pub fn cache_path() -> PathBuf {
@@ -43,7 +54,7 @@ pub fn read(path: &Path) -> Option<CacheRecord> {
     serde_json::from_slice(&bytes).ok()
 }
 
-pub fn write(path: &Path, record: &CacheRecord) -> std::io::Result<()> {
+pub fn write(path: &Path, record: &CacheRecordRef<'_>) -> std::io::Result<()> {
     // Atomic-ish write: serialize to sibling temp, rename into place.
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -87,14 +98,24 @@ mod tests {
     fn write_then_read_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("c.json");
-        let r = CacheRecord {
-            default_mtime_nanos: "9".into(),
-            node: PathBuf::from("/a"),
-            npm: PathBuf::from("/b"),
-            npx: PathBuf::from("/c"),
-        };
-        write(&p, &r).unwrap();
+        let nanos = "9";
+        let node = PathBuf::from("/a");
+        let npm = PathBuf::from("/b");
+        let npx = PathBuf::from("/c");
+        write(
+            &p,
+            &CacheRecordRef {
+                default_mtime_nanos: nanos,
+                node: &node,
+                npm: &npm,
+                npx: &npx,
+            },
+        )
+        .unwrap();
         let r2 = read(&p).unwrap();
-        assert_eq!(r, r2);
+        assert_eq!(r2.default_mtime_nanos, nanos);
+        assert_eq!(r2.node, node);
+        assert_eq!(r2.npm, npm);
+        assert_eq!(r2.npx, npx);
     }
 }
